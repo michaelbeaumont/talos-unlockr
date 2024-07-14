@@ -1,0 +1,25 @@
+[package]
+name = "talos-unlockr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = { version = "^0.12", features =["tls"] }
+prost = "^0.13.0"
+tokio = { version = "^1.0", features = ["macros", "rt-multi-thread", "signal"] }
+tokio-util = { version = "^0.7.0" }
+aead = { version = "^0.5.0", features = ["std"] }
+chacha20poly1305 = "^0.10.0"
+argon2 = { version = "^0.5.0", features = ["std"] }
+nix = { version = "^0.29.0", features = ["net"] }
+futures = "^0.3.0"
+futures-util = "^0.3.0"
+typenum = "^1.17.0"
+clap = { version = "^4.5.0", features = ["derive"] }
+password-hash = { version = "^0.5.0" }
+anyhow = "^1.0.0"
+log = { version = "^0.4.0", features = ["kv", "kv_std"] }
+env_logger = { version = "^0.11.0", features = ["unstable-kv"] }
+
+[build-dependencies]
+tonic-build = "^0.12"
