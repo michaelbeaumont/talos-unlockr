@@ -5,6 +5,7 @@ This is more or less the same functionality as [the reference KMS repo](https://
 `talos-unlockr` takes either:
 
 - a 256-bit key
+  - create one using something like `argon2 mysalt -id -r | xxd -r -p - talos.key`
 - a passphrase and runs Argon2 as KDF with node UUIDs salt
 
 and uses chacha20poly1305 to seal and unseal data for
