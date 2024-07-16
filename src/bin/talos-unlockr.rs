@@ -53,9 +53,11 @@ struct Run {
 fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     let key_source = {
         match args.key_file {
-            Some(filename) => {
+            Some(ref filename) => {
                 let mut key = Key::default();
-                let mut file = std::fs::File::open(filename)?;
+                let mut file = std::fs::File::open(filename).map_err(|err| {
+                    anyhow::Error::new(err).context(format!("couldn't open key file {}", filename.to_string_lossy()))
+                })?;
                 let file_len = file.metadata().map(|metadata| metadata.len())?;
 
                 if file_len == key.len() as u64 {
