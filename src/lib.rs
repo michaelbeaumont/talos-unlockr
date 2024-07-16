@@ -77,7 +77,7 @@ impl KmsService for Unlocker {
             data: request_data,
             node_uuid,
         } = request.into_inner();
-        log::debug!(node_uuid:display; "Seal");
+        log::debug!(node_uuid:display; "Seal request");
 
         let cipher = self.cipher_for_node(&node_uuid)?;
 
@@ -92,6 +92,7 @@ impl KmsService for Unlocker {
 
         let mut sealed = nonce.to_vec();
         sealed.extend(ciphertext);
+        log::info!(node_uuid:display; "Seal granted");
         Ok(tonic::Response::new(Response { data: sealed }))
     }
 
@@ -105,7 +106,7 @@ impl KmsService for Unlocker {
             data: request_data,
             node_uuid,
         } = request.into_inner();
-        log::debug!(node_uuid:display = node_uuid; "Unseal");
+        log::debug!(node_uuid:display = node_uuid; "Unseal request");
 
         let cipher = self.cipher_for_node(&node_uuid)?;
 
@@ -123,7 +124,10 @@ impl KmsService for Unlocker {
         }?;
 
         match cipher.decrypt(nonce, ciphertext) {
-            Ok(plaintext) => Ok(tonic::Response::new(Response { data: plaintext })),
+            Ok(plaintext) => {
+                log::info!(node_uuid:display; "Unseal granted");
+                Ok(tonic::Response::new(Response { data: plaintext }))
+            }
             Err(err) => {
                 log::error!(err:err, node_uuid:display = &node_uuid; "couldn't decrypt");
                 Err(tonic::Status::invalid_argument("invalid request"))
