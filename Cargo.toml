@@ -11,7 +11,7 @@ tokio-util = { version = "^0.7.15" }
 aead = { version = "^0.5.0", features = ["std"] }
 chacha20poly1305 = "^0.10.0"
 argon2 = { version = "^0.5.0", features = ["std"] }
-nix = { version = "^0.29.0", features = ["net"] }
+nix = { version = "^0.30.1", features = ["net"] }
 futures = "^0.3.0"
 futures-util = "^0.3.0"
 typenum = "^1.17.0"
