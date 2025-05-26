@@ -22,4 +22,4 @@ log = { version = "^0.4.27", features = ["kv", "kv_std"] }
 env_logger = { version = "^0.11.8", features = ["unstable-kv"] }
 
 [build-dependencies]
-tonic-build = "^0.12"
+tonic-build = "^0.13"
