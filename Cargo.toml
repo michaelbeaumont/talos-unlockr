@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tonic = { version = "^0.12", features =["tls"] }
+tonic = { version = "^0.13", features =["tls-ring"] }
 prost = "^0.13.5"
 tokio = { version = "^1.45", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "^0.7.15" }
