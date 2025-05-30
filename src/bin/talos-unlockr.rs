@@ -1,6 +1,5 @@
 use std::{
-    io::{stdin, Read},
-    net, time,
+    io::{stdin, Read}, net, str::FromStr, time
 };
 
 use anyhow::Context;
@@ -12,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use talos_unlockr::{KeySource, Unlocker};
+use uuid::Uuid;
 
 #[derive(Debug, Args)]
 struct TlsCli {
@@ -26,6 +26,11 @@ fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntEr
     Ok(std::time::Duration::from_secs(seconds))
 }
 
+fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
+    let (raw_ip, raw_uuid) = arg.rsplit_once(":").context("couldn't split on colon")?;
+    Ok((net::IpAddr::from_str(raw_ip).context("invalid IP")?, Uuid::from_str(raw_uuid).context("invalid UUID")?))
+}
+
 #[derive(Debug, Parser)]
 struct Cli {
     #[arg(long, value_parser = parse_duration)]
@@ -34,8 +39,8 @@ struct Cli {
     interface: Option<String>,
     #[arg(long)]
     port: u16,
-    #[arg(long)]
-    allowed_ips: Vec<net::IpAddr>,
+    #[arg(long, value_parser = parse_colon_separated)]
+    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
@@ -46,7 +51,7 @@ struct Run {
     timeout_secs: Option<time::Duration>,
     addrs: Vec<net::IpAddr>,
     port: u16,
-    allowed_ips: Vec<net::IpAddr>,
+    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     key_source: KeySource,
     tls_identity: Option<Identity>,
 }
