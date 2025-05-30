@@ -3,11 +3,12 @@ use std::{
     net, time,
 };
 
+use anyhow::Context;
 use chacha20poly1305::Key;
 use clap::{Args, Parser};
-use futures::future::Either;
-use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
-use tokio::{signal, time as tokio_time};
+use futures_util::FutureExt;
+use tokio::{signal, task::JoinSet, time as tokio_time};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use talos_unlockr::{KeySource, Unlocker};
@@ -56,7 +57,10 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
             Some(ref filename) => {
                 let mut key = Key::default();
                 let mut file = std::fs::File::open(filename).map_err(|err| {
-                    anyhow::Error::new(err).context(format!("couldn't open key file {}", filename.to_string_lossy()))
+                    anyhow::Error::new(err).context(format!(
+                        "couldn't open key file {}",
+                        filename.to_string_lossy()
+                    ))
                 })?;
                 let file_len = file.metadata().map(|metadata| metadata.len())?;
 
@@ -123,11 +127,6 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     })
 }
 
-enum RunFuture {
-    ListenerClose,
-    Timeout,
-}
-
 async fn run(
     Run {
         timeout_secs,
@@ -138,20 +137,13 @@ async fn run(
         tls_identity,
     }: Run,
 ) -> Result<(), anyhow::Error> {
-    let mut servers = addrs
+    let cancelled = CancellationToken::new();
+
+    let mut join_set: JoinSet<_> = addrs
         .into_iter()
         .map(|ip_addr| {
             let socket_addr = net::SocketAddr::new(ip_addr, port);
             log::info!(socket_addr:?; "listening");
-
-            let shutdown = signal::ctrl_c().map(move |res| match res {
-                Ok(()) => {
-                    log::info!(socket_addr:?; "caught ctrl-c")
-                }
-                Err(err) => {
-                    log::error!(err:err, socket_addr:?; "error waiting on ctrl-c")
-                }
-            });
 
             let unlocker = Unlocker::new(
                 allowed_ips.clone().into_iter().collect(),
@@ -165,35 +157,47 @@ async fn run(
                     .unwrap()
             }
 
-            Either::Right(
-                builder
-                    .add_service(unlocker)
-                    .serve_with_shutdown(socket_addr, shutdown)
-                    .map(move |res| match res {
-                        Err(err) => Err(anyhow::Error::new(err).context(socket_addr)),
-                        Ok(()) => Ok(RunFuture::ListenerClose),
-                    }),
-            )
+            let cancelled = cancelled.clone();
+            builder
+                .add_service(unlocker)
+                .serve_with_shutdown(socket_addr, async move {
+                    cancelled.cancelled_owned().await;
+                    log::info!(socket_addr:?; "shutting down");
+                })
+                .map(move |err| err.context(socket_addr))
         })
-        .collect::<FuturesUnordered<_>>();
+        .collect();
+
+    let ctrl_c_cancelled = cancelled.clone();
+    join_set.spawn(
+        cancelled
+            .clone()
+            .run_until_cancelled_owned(signal::ctrl_c().map(move |res| {
+                res.expect("ctrl-c signal should work");
+                ctrl_c_cancelled.cancel();
+                log::info!("caught ctrl-c")
+            }))
+            .map(|_| Ok(())),
+    );
 
     if let Some(timeout_secs) = timeout_secs {
-        servers.push(Either::Left(
-            tokio_time::sleep(timeout_secs).map(|_| Ok(RunFuture::Timeout)),
-        ));
+        let cancelled = cancelled.clone();
+        join_set.spawn(
+            cancelled
+                .clone()
+                .run_until_cancelled_owned(tokio_time::sleep(timeout_secs).map(move |_| {
+                    log::info!("timed out, exiting");
+                    cancelled.cancel();
+                }))
+                .map(|_| Ok(())),
+        );
     }
 
-    while let Some(res) = servers.next().await {
-        match res {
-            Ok(RunFuture::ListenerClose) => continue,
-            Ok(RunFuture::Timeout) => {
-                log::info!("timed out, exiting");
-                return Ok(());
-            }
-            Err(err) => log::error!(err:?; "server encountered error"),
-        }
-    }
-    Ok(())
+    join_set
+        .join_all()
+        .await
+        .into_iter()
+        .collect::<Result<_, _>>()
 }
 
 #[tokio::main]
