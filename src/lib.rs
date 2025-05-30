@@ -11,6 +11,7 @@ use kms::{
 };
 use tonic::transport::server::TcpConnectInfo;
 use typenum::Unsigned;
+use uuid::Uuid;
 
 mod kms;
 
@@ -22,18 +23,18 @@ pub enum KeySource {
 
 pub struct Unlocker {
     key: KeySource,
-    allowed_ips: std::collections::HashSet<net::IpAddr>,
+    allowed_ips: std::collections::HashSet<(net::IpAddr, Uuid)>,
 }
 
 impl Unlocker {
     pub fn new(
-        allowed_ips: std::collections::HashSet<net::IpAddr>,
+        allowed_ips: std::collections::HashSet<(net::IpAddr, Uuid)>,
         key: KeySource,
     ) -> KmsServiceServer<Self> {
         KmsServiceServer::new(Self { allowed_ips, key })
     }
 
-    fn cipher_for_node(&self, node_uuid: &str) -> Result<ChaCha20Poly1305, tonic::Status> {
+    fn cipher_for_node(&self, node_uuid: &Uuid) -> Result<ChaCha20Poly1305, tonic::Status> {
         match &self.key {
             KeySource::Key(key) => Ok(ChaCha20Poly1305::new(key)),
             KeySource::Kdf(passphrase) => {
@@ -53,14 +54,18 @@ impl Unlocker {
         }
     }
 
-    fn ensure_ip(&self, request: &tonic::Request<Request>) -> Result<(), tonic::Status> {
+    fn ensure_ip(&self, request: tonic::Request<Request>) -> Result<(Vec<u8>, Uuid), tonic::Status> {
         let connection_info = request.extensions().get::<TcpConnectInfo>().unwrap();
         let remote_addr = connection_info.remote_addr.unwrap().ip();
-        if !self.allowed_ips.is_empty() && !self.allowed_ips.contains(&remote_addr) {
+        let uuid = {
+            let uuid = &request.get_ref().node_uuid;
+            Uuid::parse_str(uuid).expect("valid uuid")
+        };
+        if !self.allowed_ips.is_empty() && !self.allowed_ips.contains(&(remote_addr, uuid)) {
             log::debug!(node_uuid:display = request.get_ref().node_uuid, ip:display = connection_info.remote_addr.unwrap(); "unallowed ip");
             Err(tonic::Status::permission_denied("invalid source IP"))
         } else {
-            Ok(())
+            Ok((request.into_inner().data, uuid))
         }
     }
 }
@@ -71,13 +76,9 @@ impl KmsService for Unlocker {
         &self,
         request: tonic::Request<Request>,
     ) -> Result<tonic::Response<Response>, tonic::Status> {
-        self.ensure_ip(&request)?;
+        let (request_data, node_uuid) = self.ensure_ip(request)?;
 
-        let Request {
-            data: request_data,
-            node_uuid,
-        } = request.into_inner();
-        log::debug!(node_uuid:display; "Seal request");
+        log::debug!(node_uuid:%; "Seal request");
 
         let cipher = self.cipher_for_node(&node_uuid)?;
 
@@ -92,7 +93,7 @@ impl KmsService for Unlocker {
 
         let mut sealed = nonce.to_vec();
         sealed.extend(ciphertext);
-        log::info!(node_uuid:display; "Seal granted");
+        log::info!(node_uuid:%; "Seal granted");
         Ok(tonic::Response::new(Response { data: sealed }))
     }
 
@@ -100,13 +101,9 @@ impl KmsService for Unlocker {
         &self,
         request: tonic::Request<Request>,
     ) -> Result<tonic::Response<Response>, tonic::Status> {
-        self.ensure_ip(&request)?;
+        let (request_data, node_uuid) = self.ensure_ip(request)?;
 
-        let Request {
-            data: request_data,
-            node_uuid,
-        } = request.into_inner();
-        log::debug!(node_uuid:display = node_uuid; "Unseal request");
+        log::debug!(node_uuid:%; "Unseal request");
 
         let cipher = self.cipher_for_node(&node_uuid)?;
 
@@ -117,7 +114,7 @@ impl KmsService for Unlocker {
                     Ok((Nonce::<ChaCha20Poly1305>::from_slice(raw_nonce), ciphertext))
                 }
                 None => {
-                    log::error!(node_uuid:display = &node_uuid; "request data too short");
+                    log::error!(node_uuid:%; "request data too short");
                     Err(tonic::Status::invalid_argument("invalid request"))
                 }
             }
@@ -125,7 +122,7 @@ impl KmsService for Unlocker {
 
         match cipher.decrypt(nonce, ciphertext) {
             Ok(plaintext) => {
-                log::info!(node_uuid:display; "Unseal granted");
+                log::info!(node_uuid:%; "Unseal granted");
                 Ok(tonic::Response::new(Response { data: plaintext }))
             }
             Err(err) => {

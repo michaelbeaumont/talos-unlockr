@@ -1,7 +1,7 @@
 [package]
 name = "talos-unlockr"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 tonic = { version = "^0.13", features =["tls-ring"] }
@@ -20,6 +20,7 @@ password-hash = { version = "^0.5.0" }
 anyhow = "^1.0.98"
 log = { version = "^0.4.27", features = ["kv", "kv_std"] }
 env_logger = { version = "^0.11.8", features = ["unstable-kv"] }
+uuid = "1.17.0"
 
 [build-dependencies]
 tonic-build = "^0.13"
