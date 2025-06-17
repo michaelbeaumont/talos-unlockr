@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tonic = { version = "^0.13", features =["tls-ring"] }
-prost = "^0.13.5"
+prost = "^0.14.0"
 tokio = { version = "^1.45", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "^0.7.15" }
 aead = { version = "^0.5.0", features = ["std"] }
