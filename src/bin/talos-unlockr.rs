@@ -1,7 +1,10 @@
 use std::{
+    collections::HashSet,
+    fs::set_permissions,
     io::{Read, stdin},
     net,
     os::fd::{FromRawFd, IntoRawFd},
+    os::unix::fs::PermissionsExt,
     str::FromStr,
     time,
 };
@@ -9,14 +12,18 @@ use std::{
 use anyhow::Context;
 use chacha20poly1305::Key;
 use clap::{Args, Parser};
-use futures::future::Either;
+use futures::future::{Either, join};
 use futures_util::FutureExt;
 use libsystemd::activation::IsType;
-use tokio::{net::TcpListener, signal, task::JoinSet, time as tokio_time};
-use tokio_util::sync::CancellationToken;
+use tokio::{
+    signal,
+    sync::{broadcast, watch},
+    task::JoinSet,
+};
+use tokio_util::{sync::CancellationToken, task::task_tracker::TaskTracker};
 use tonic::transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming};
 
-use talos_unlockr::{KeySource, Unlocker};
+use talos_unlockr::{KeySource, Unlocker, sync};
 use uuid::Uuid;
 
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
@@ -25,7 +32,7 @@ fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntEr
 }
 
 fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
-    let (raw_ip, raw_uuid) = arg.rsplit_once(":").context("couldn't split on colon")?;
+    let (raw_ip, raw_uuid) = arg.split_once("/").context("couldn't split on slash")?;
     Ok((
         net::IpAddr::from_str(raw_ip).context("invalid IP")?,
         Uuid::from_str(raw_uuid).context("invalid UUID")?,
@@ -56,20 +63,23 @@ struct Cli {
     listen: Option<ListenCli>,
     #[arg(long, conflicts_with_all = ["interface", "port"])]
     named_sockets: bool,
-    #[arg(long, value_parser = parse_colon_separated)]
-    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     tls: Option<TlsCli>,
+    #[arg(long)]
+    socket: Option<std::path::PathBuf>,
+    #[arg(long, value_parser = parse_colon_separated)]
+    allowed_ips: Vec<(net::IpAddr, Uuid)>,
 }
 
 struct Run {
     timeout_secs: Option<time::Duration>,
     listen: Either<(Vec<net::IpAddr>, u16), net::TcpListener>,
-    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     key_source: KeySource,
     tls_identity: Option<Identity>,
+    socket: Option<std::path::PathBuf>,
+    allowed_ips: HashSet<(net::IpAddr, Uuid)>,
 }
 
 fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
@@ -77,26 +87,24 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         match args.key_file {
             Some(ref filename) => {
                 let mut key = Key::default();
-                let mut file = std::fs::File::open(filename).map_err(|err| {
-                    anyhow::Error::new(err).context(format!(
-                        "couldn't open key file {}",
-                        filename.to_string_lossy()
-                    ))
+                let mut file = std::fs::File::open(filename).with_context(|| {
+                    format!("couldn't open key file {}", filename.to_string_lossy())
                 })?;
                 let file_len = file
                     .metadata()
                     .map(|metadata| metadata.len())
-                    .context("failed to get key metadata")?;
+                    .context("failed to get file metadata")?;
 
                 if file_len == key.len() as u64 {
-                    file.read_exact(&mut key)?;
+                    file.read_exact(&mut key)
+                        .context("failed to read key from command line")?;
                     Ok(KeySource::Key(key))
                 } else {
-                    Err(anyhow::Error::msg(format!(
+                    Err(anyhow::anyhow!(
                         "invalid key in file, expected length: {}, actual length: {}",
                         key.len(),
                         file_len,
-                    )))
+                    ))
                 }
             }
             None => Ok({
@@ -105,7 +113,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                 println!(">>> Enter passphrase:");
                 stdin()
                     .read_line(&mut passphrase)
-                    .context("failed to read stdin")?;
+                    .context("failed to read passphrase from stdin")?;
                 KeySource::Kdf(passphrase.trim_end().to_owned().into_bytes())
             }),
         }
@@ -162,9 +170,10 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     Ok(Run {
         timeout_secs: args.timeout_secs,
         listen,
-        allowed_ips: args.allowed_ips,
         key_source,
         tls_identity,
+        allowed_ips: args.allowed_ips.into_iter().collect(),
+        socket: args.socket,
     })
 }
 
@@ -172,9 +181,10 @@ async fn run(
     Run {
         timeout_secs,
         listen,
-        allowed_ips,
         key_source,
         tls_identity,
+        allowed_ips,
+        socket,
     }: Run,
 ) -> Result<(), anyhow::Error> {
     let cancelled = CancellationToken::new();
@@ -188,7 +198,7 @@ async fn run(
 
             listener.set_nonblocking(true)?;
             let listener =
-                TcpListener::from_std(listener).context("failed to convert from std listener")?;
+                tokio::net::TcpListener::from_std(listener).context("failed to convert from std listener")?;
 
             vec![(socket_addr, TcpIncoming::from(listener))]
         }
@@ -207,14 +217,15 @@ async fn run(
             .collect::<Vec<_>>(),
     };
 
+    let (update_allowed, allowed) = watch::channel(allowed_ips);
+    let send_attempts = broadcast::Sender::new(1);
+
     let mut join_set: JoinSet<_> = incoming
         .into_iter()
         .map(|(socket_addr, incoming)| {
             log::info!(socket_addr:?; "listening");
-            let unlocker = Unlocker::new(
-                allowed_ips.clone().into_iter().collect(),
-                key_source.clone(),
-            );
+            let unlocker =
+                Unlocker::new(key_source.clone(), allowed.clone(), send_attempts.clone());
 
             let mut builder = Server::builder();
             if let Some(identity) = &tls_identity {
@@ -237,16 +248,61 @@ async fn run(
         })
         .collect();
 
+    if let Some(socket) = &socket {
+        let listener =
+            tokio::net::UnixListener::bind(socket).context("failed to open unix socket")?;
+        set_permissions(socket, PermissionsExt::from_mode(0o700))
+            .context("failed to chmod unix socket")?;
+
+        let tasks = TaskTracker::new();
+        let shutdown_tasks = tasks.clone();
+        let cancelled_conn = cancelled.clone();
+
+        let handle_conns = async move {
+            loop {
+                let (stream, sink) = listener
+                    .accept()
+                    .await
+                    .expect("should accept")
+                    .0
+                    .into_split();
+
+                tasks.spawn(cancelled_conn.clone().run_until_cancelled_owned(join(
+                    sync::sink_attempts(sink, send_attempts.subscribe()),
+                    sync::stream_allowed(stream, update_allowed.clone()),
+                )));
+            }
+        };
+
+        join_set.spawn(
+            cancelled
+                .clone()
+                .run_until_cancelled_owned(handle_conns)
+                .then(async move |_| {
+                    log::info!("waiting for connections to shutdown");
+                    shutdown_tasks.close();
+                    shutdown_tasks.wait().await;
+                })
+                .map(Ok),
+        );
+    }
+
     let ctrl_c_cancelled = cancelled.clone();
     join_set.spawn(
         cancelled
             .clone()
             .run_until_cancelled_owned(signal::ctrl_c().map(move |res| {
                 res.expect("ctrl-c signal should work");
+                log::info!("caught ctrl-c");
                 ctrl_c_cancelled.cancel();
-                log::info!("caught ctrl-c")
+                anyhow::Ok(())
             }))
-            .map(|_| Ok(())),
+            .map(move |_| {
+                if let Some(socket) = socket {
+                    let _ = std::fs::remove_file(socket);
+                }
+                Ok(())
+            }),
     );
 
     if let Some(timeout_secs) = timeout_secs {
@@ -254,7 +310,7 @@ async fn run(
         join_set.spawn(
             cancelled
                 .clone()
-                .run_until_cancelled_owned(tokio_time::sleep(timeout_secs).map(move |_| {
+                .run_until_cancelled_owned(tokio::time::sleep(timeout_secs).map(move |_| {
                     log::info!("timed out, exiting");
                     cancelled.cancel();
                 }))
