@@ -95,3 +95,40 @@ IPAddressDeny=any
 [Install]
 WantedBy=sockets.target
 ```
+
+## Telegram bot
+
+`talos-unlockr` can also be run alongside a Telegram bot. The bot can be used to
+notify about and allow attempts to seal/unseal.
+
+```
+[Unit]
+Description=Telegram bot for talos-unlockr
+Wants=network-online.target
+After=network-online.target
+JoinsNamespaceOf=talos-unlockr.service
+
+[Service]
+Type=exec
+ExecStart=telegram-bot --socket /tmp/talos-unlockr.sock --user-id <TELEGRAM_USER> --allowed-ips <CLUSTER_NAME>/<IP>/<UUID>
+Environment=TELOXIDE_TOKEN=...
+Restart=on-failure
+PrivateMounts=yes
+PrivateTmp=yes
+DynamicUser=yes
+# ... other security options
+
+[Install]
+WantedBy=multi-user.target
+```
+
+and add to `talos-unlockr.service`:
+
+```
+[Unit]
+Wants=talos-unlockr-bot.service
+
+[Service]
+ExecStart=... --socket /tmp/talos-unlockr.sock
+PrivateTmp=yes
+```
