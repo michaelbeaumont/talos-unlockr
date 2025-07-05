@@ -95,3 +95,8 @@ IPAddressDeny=any
 [Install]
 WantedBy=sockets.target
 ```
+
+## Telegram bot
+
+`talos-unlockr` can also be run alongside a Telegram bot. The bot can be used to
+inform about and allow attempts to seal/unseal.
