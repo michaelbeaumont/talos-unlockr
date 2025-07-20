@@ -35,13 +35,42 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+Type=exec
 ConfigurationDirectory=talos-unlockr
 EnvironmentFile=%E/talos-unlockr/flags.env
-LoadCredentialEncrypted=talos.key:talos.key
+LoadCredentialEncrypted=node.key:node.k8rn.talos.key
+LoadCredentialEncrypted=key.pem:talos-unlockr.key.pem
+LoadCredentialEncrypted=crt.pem:talos-unlockr.crt.pem
 ExecSearchPath=/usr/local/bin
-ExecStart=talos-unlockr --key-file %d/talos.key $FLAGS
+ExecStart=talos-unlockr --key-file %d/node.key --tls-key %d/key.pem --tls-cert %d/crt.pem $FLAGS
 Restart=on-failure
-Type=exec
+ProtectHome=yes
+PrivateUsers=yes
+DynamicUser=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+CapabilityBoundingSet=
+ProtectControlGroups=strict
+ProtectSystem=strict
+ProtectProc=invisible
+ProtectHostname=yes
+# PrivateNetwork=yes
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+IPAddressAllow=192.168.0.1/23
+IPAddressDeny=any
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
