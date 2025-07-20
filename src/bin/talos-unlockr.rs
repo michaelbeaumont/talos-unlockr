@@ -1,6 +1,7 @@
 use std::{
     io::{Read, stdin},
     net,
+    os::fd::{FromRawFd, IntoRawFd},
     str::FromStr,
     time,
 };
@@ -8,10 +9,12 @@ use std::{
 use anyhow::Context;
 use chacha20poly1305::Key;
 use clap::{Args, Parser};
+use futures::future::Either;
 use futures_util::FutureExt;
-use tokio::{signal, task::JoinSet, time as tokio_time};
+use libsystemd::activation::IsType;
+use tokio::{net::TcpListener, signal, task::JoinSet, time as tokio_time};
 use tokio_util::sync::CancellationToken;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming};
 
 use talos_unlockr::{KeySource, Unlocker};
 use uuid::Uuid;
@@ -45,6 +48,8 @@ struct Cli {
     interface: Option<String>,
     #[arg(long)]
     port: u16,
+    #[arg(long)]
+    named_sockets: bool,
     #[arg(long, value_parser = parse_colon_separated)]
     allowed_ips: Vec<(net::IpAddr, Uuid)>,
     #[arg(long)]
@@ -55,8 +60,7 @@ struct Cli {
 
 struct Run {
     timeout_secs: Option<time::Duration>,
-    addrs: Vec<net::IpAddr>,
-    port: u16,
+    listen: Either<(Vec<net::IpAddr>, u16), net::TcpListener>,
     allowed_ips: Vec<(net::IpAddr, Uuid)>,
     key_source: KeySource,
     tls_identity: Option<Identity>,
@@ -101,9 +105,9 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         }
     }?;
 
-    let addrs = match args.interface {
-        None => vec![net::Ipv6Addr::UNSPECIFIED.into()],
-        Some(interface) => {
+    let listen = match (args.interface, args.named_sockets) {
+        (None, false) => Either::Left((vec![net::Ipv6Addr::UNSPECIFIED.into()], args.port)),
+        (Some(interface), _) => {
             let mut addrs: Vec<net::IpAddr> = Vec::new();
             for ifaddr in nix::ifaddrs::getifaddrs().expect("failed to get ifaddrs") {
                 if ifaddr.interface_name != interface {
@@ -121,7 +125,17 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                     None => continue,
                 }
             }
-            addrs
+            Either::Left((addrs, args.port))
+        }
+        (None, true) => {
+            let descriptors = libsystemd::activation::receive_descriptors_with_names(true)
+                .context("failed to receive named sockets")?;
+            let (fd, _) = descriptors
+                .into_iter()
+                .find(|(fd, name)| name == "grpc" && fd.is_inet())
+                .expect("failed to find named inet socket");
+            // SAFETY: systemd guarantees this is a valid socket file descriptor.
+            Either::Right(unsafe { net::TcpListener::from_raw_fd(fd.into_raw_fd()) })
         }
     };
 
@@ -135,8 +149,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
 
     Ok(Run {
         timeout_secs: args.timeout_secs,
-        addrs,
-        port: args.port,
+        listen,
         allowed_ips: args.allowed_ips,
         key_source,
         tls_identity,
@@ -146,8 +159,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
 async fn run(
     Run {
         timeout_secs,
-        addrs,
-        port,
+        listen,
         allowed_ips,
         key_source,
         tls_identity,
@@ -155,12 +167,29 @@ async fn run(
 ) -> Result<(), anyhow::Error> {
     let cancelled = CancellationToken::new();
 
-    let mut join_set: JoinSet<_> = addrs
-        .into_iter()
-        .map(|ip_addr| {
-            let socket_addr = net::SocketAddr::new(ip_addr, port);
-            log::info!(socket_addr:?; "listening");
+    const TCP_NODELAY: bool = true;
+    let incoming = match listen {
+        Either::Right(listener) => {
+            let socket_addr = listener
+                .local_addr()
+                .context("failed to get local address")?;
+            let listener =
+                TcpListener::from_std(listener).context("failed to convert from std listener")?;
+            vec![(socket_addr, TcpIncoming::from(listener))]
+        }
+        Either::Left((addrs, port)) => addrs
+            .into_iter()
+            .map(|ip| {
+                let socket_addr = net::SocketAddr::new(ip, port);
+                anyhow::Ok((socket_addr, TcpIncoming::bind(socket_addr)?))
+            })
+            .collect::<Result<_, _>>()?,
+    };
 
+    let mut join_set: JoinSet<_> = incoming
+        .into_iter()
+        .map(|(socket_addr, incoming)| {
+            log::info!(socket_addr:?; "listening");
             let unlocker = Unlocker::new(
                 allowed_ips.clone().into_iter().collect(),
                 key_source.clone(),
@@ -176,10 +205,13 @@ async fn run(
             let cancelled = cancelled.clone();
             builder
                 .add_service(unlocker)
-                .serve_with_shutdown(socket_addr, async move {
-                    cancelled.cancelled_owned().await;
-                    log::info!(socket_addr:?; "shutting down");
-                })
+                .serve_with_incoming_shutdown(
+                    incoming.with_nodelay(Some(TCP_NODELAY)),
+                    async move {
+                        cancelled.cancelled_owned().await;
+                        log::info!(socket_addr:?; "shutting down");
+                    },
+                )
                 .map(move |err| err.context(socket_addr))
         })
         .collect();

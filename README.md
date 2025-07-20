@@ -28,6 +28,8 @@ argon2 mysalt -id -r \
   | sudo systemd-creds encrypt - /etc/credstore.encrypted/talos.key --name talos.key
 ```
 
+create a service file `/etc/systemd/system/talos-unlockr.service`:
+
 ```
 [Unit]
 Description=Unlock encrypted Talos
@@ -59,14 +61,14 @@ ProtectControlGroups=strict
 ProtectSystem=strict
 ProtectProc=invisible
 ProtectHostname=yes
-# PrivateNetwork=yes
+PrivateNetwork=yes
 ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RestrictAddressFamilies=none
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
 IPAddressAllow=192.168.0.1/23
 IPAddressDeny=any
@@ -74,4 +76,21 @@ UMask=0077
 
 [Install]
 WantedBy=multi-user.target
+```
+
+and a socket file `/etc/systemd/system/talos-unlockr.socket`:
+
+```
+[Unit]
+Description=GRPC socket for talos-unlockr
+
+[Socket]
+ListenStream=11111
+BindIPv6Only=both
+Accept=no
+FileDescriptorName=grpc
+Service=talos-unlockr.service
+
+[Install]
+WantedBy=sockets.target
 ```
