@@ -1,5 +1,8 @@
 use std::{
-    io::{stdin, Read}, net, str::FromStr, time
+    io::{Read, stdin},
+    net,
+    str::FromStr,
+    time,
 };
 
 use anyhow::Context;
@@ -90,7 +93,9 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                 let mut passphrase = String::new();
                 println!("Using KDF with node UUID as salt...");
                 println!(">>> Enter passphrase:");
-                stdin().read_line(&mut passphrase).context("failed to read stdin")?;
+                stdin()
+                    .read_line(&mut passphrase)
+                    .context("failed to read stdin")?;
                 KeySource::Kdf(passphrase.trim_end().to_owned().into_bytes())
             }),
         }
