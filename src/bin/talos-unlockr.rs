@@ -28,7 +28,10 @@ fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntEr
 
 fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
     let (raw_ip, raw_uuid) = arg.rsplit_once(":").context("couldn't split on colon")?;
-    Ok((net::IpAddr::from_str(raw_ip).context("invalid IP")?, Uuid::from_str(raw_uuid).context("invalid UUID")?))
+    Ok((
+        net::IpAddr::from_str(raw_ip).context("invalid IP")?,
+        Uuid::from_str(raw_uuid).context("invalid UUID")?,
+    ))
 }
 
 #[derive(Debug, Parser)]
@@ -67,7 +70,10 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                         filename.to_string_lossy()
                     ))
                 })?;
-                let file_len = file.metadata().map(|metadata| metadata.len())?;
+                let file_len = file
+                    .metadata()
+                    .map(|metadata| metadata.len())
+                    .context("failed to get key metadata")?;
 
                 if file_len == key.len() as u64 {
                     file.read_exact(&mut key)?;
@@ -84,7 +90,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                 let mut passphrase = String::new();
                 println!("Using KDF with node UUID as salt...");
                 println!(">>> Enter passphrase:");
-                stdin().read_line(&mut passphrase)?;
+                stdin().read_line(&mut passphrase).context("failed to read stdin")?;
                 KeySource::Kdf(passphrase.trim_end().to_owned().into_bytes())
             }),
         }
@@ -94,7 +100,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         None => vec![net::Ipv6Addr::UNSPECIFIED.into()],
         Some(interface) => {
             let mut addrs: Vec<net::IpAddr> = Vec::new();
-            for ifaddr in nix::ifaddrs::getifaddrs().unwrap() {
+            for ifaddr in nix::ifaddrs::getifaddrs().expect("failed to get ifaddrs") {
                 if ifaddr.interface_name != interface {
                     continue;
                 }
@@ -115,8 +121,8 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     };
 
     let tls_identity = if let Some(tls) = args.tls {
-        let cert = std::fs::read_to_string(tls.tls_cert)?;
-        let key = std::fs::read_to_string(tls.tls_key)?;
+        let cert = std::fs::read_to_string(tls.tls_cert).context("failed to read TLS cert file")?;
+        let key = std::fs::read_to_string(tls.tls_key).context("failed to read TLS key file")?;
         Some(Identity::from_pem(cert, key))
     } else {
         None

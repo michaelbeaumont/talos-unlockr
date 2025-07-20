@@ -2,12 +2,12 @@ use std::net;
 
 use argon2::Argon2;
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, Nonce, OsRng},
     ChaCha20Poly1305, Key,
+    aead::{Aead, AeadCore, KeyInit, Nonce, OsRng},
 };
 use kms::{
-    kms_service_server::{KmsService, KmsServiceServer},
     Request, Response,
+    kms_service_server::{KmsService, KmsServiceServer},
 };
 use tonic::transport::server::TcpConnectInfo;
 use typenum::Unsigned;
@@ -54,7 +54,10 @@ impl Unlocker {
         }
     }
 
-    fn ensure_ip(&self, request: tonic::Request<Request>) -> Result<(Vec<u8>, Uuid), tonic::Status> {
+    fn ensure_ip(
+        &self,
+        request: tonic::Request<Request>,
+    ) -> Result<(Vec<u8>, Uuid), tonic::Status> {
         let connection_info = request.extensions().get::<TcpConnectInfo>().unwrap();
         let remote_addr = connection_info.remote_addr.unwrap().ip();
         let uuid = {
