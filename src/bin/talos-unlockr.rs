@@ -173,8 +173,11 @@ async fn run(
             let socket_addr = listener
                 .local_addr()
                 .context("failed to get local address")?;
+
+            listener.set_nonblocking(true)?;
             let listener =
                 TcpListener::from_std(listener).context("failed to convert from std listener")?;
+
             vec![(socket_addr, TcpIncoming::from(listener))]
         }
         Either::Left((addrs, port)) => addrs
