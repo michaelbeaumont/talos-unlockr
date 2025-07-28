@@ -19,14 +19,6 @@ use tonic::transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming};
 use talos_unlockr::{KeySource, Unlocker};
 use uuid::Uuid;
 
-#[derive(Debug, Args)]
-struct TlsCli {
-    #[arg(long, required = false)]
-    tls_key: std::path::PathBuf,
-    #[arg(long, required = false)]
-    tls_cert: std::path::PathBuf,
-}
-
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
     let seconds = arg.parse()?;
     Ok(std::time::Duration::from_secs(seconds))
@@ -40,15 +32,29 @@ fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
     ))
 }
 
+#[derive(Debug, Args)]
+struct TlsCli {
+    #[arg(long, required = false)]
+    tls_key: std::path::PathBuf,
+    #[arg(long, required = false)]
+    tls_cert: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ListenCli {
+    #[arg(long, required = false)]
+    interface: Option<String>,
+    #[arg(long, required = false)]
+    port: u16,
+}
+
 #[derive(Debug, Parser)]
 struct Cli {
     #[arg(long, value_parser = parse_duration)]
     timeout_secs: Option<time::Duration>,
-    #[arg(long)]
-    interface: Option<String>,
-    #[arg(long)]
-    port: u16,
-    #[arg(long)]
+    #[command(flatten)]
+    listen: Option<ListenCli>,
+    #[arg(long, conflicts_with_all = ["interface", "port"])]
     named_sockets: bool,
     #[arg(long, value_parser = parse_colon_separated)]
     allowed_ips: Vec<(net::IpAddr, Uuid)>,
@@ -105,9 +111,19 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         }
     }?;
 
-    let listen = match (args.interface, args.named_sockets) {
-        (None, false) => Either::Left((vec![net::Ipv6Addr::UNSPECIFIED.into()], args.port)),
-        (Some(interface), _) => {
+    let listen = match (args.listen, args.named_sockets) {
+        (_, true) => {
+            let descriptors = libsystemd::activation::receive_descriptors_with_names(true)
+                .context("failed to receive named sockets")?;
+            let (fd, _) = descriptors
+                .into_iter()
+                .find(|(fd, name)| name == "grpc" && fd.is_inet())
+                .expect("failed to find named inet socket");
+            // SAFETY: systemd guarantees this is a valid socket file descriptor.
+            Either::Right(unsafe { net::TcpListener::from_raw_fd(fd.into_raw_fd()) })
+        }
+        (Some(ListenCli{interface: None, port}), _) => Either::Left((vec![net::Ipv6Addr::UNSPECIFIED.into()], port)),
+        (Some(ListenCli{interface: Some(interface), port}), _) => {
             let mut addrs: Vec<net::IpAddr> = Vec::new();
             for ifaddr in nix::ifaddrs::getifaddrs().expect("failed to get ifaddrs") {
                 if ifaddr.interface_name != interface {
@@ -125,17 +141,13 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                     None => continue,
                 }
             }
-            Either::Left((addrs, args.port))
+            if addrs.is_empty() {
+                anyhow::bail!("No addresses found for interface: {}", interface);
+            }
+            Either::Left((addrs, port))
         }
-        (None, true) => {
-            let descriptors = libsystemd::activation::receive_descriptors_with_names(true)
-                .context("failed to receive named sockets")?;
-            let (fd, _) = descriptors
-                .into_iter()
-                .find(|(fd, name)| name == "grpc" && fd.is_inet())
-                .expect("failed to find named inet socket");
-            // SAFETY: systemd guarantees this is a valid socket file descriptor.
-            Either::Right(unsafe { net::TcpListener::from_raw_fd(fd.into_raw_fd()) })
+        (None, false) => {
+            anyhow::bail!("You must use either --named-sockets or --port (optionally with --interface)");
         }
     };
 
