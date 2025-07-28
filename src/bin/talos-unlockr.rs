@@ -182,11 +182,17 @@ async fn run(
         }
         Either::Left((addrs, port)) => addrs
             .into_iter()
-            .map(|ip| {
+            .flat_map(|ip| {
                 let socket_addr = net::SocketAddr::new(ip, port);
-                anyhow::Ok((socket_addr, TcpIncoming::bind(socket_addr)?))
+                match TcpIncoming::bind(socket_addr) {
+                    Ok(incoming) => Some((socket_addr, incoming)),
+                    Err(err) => {
+                        log::warn!(err:?, socket_addr:?; "failed to bind");
+                        None
+                    }
+                }
             })
-            .collect::<Result<_, _>>()?,
+            .collect::<Vec<_>>(),
     };
 
     let mut join_set: JoinSet<_> = incoming
