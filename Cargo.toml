@@ -24,4 +24,4 @@ uuid = "1.17.0"
 libsystemd = "0.7.2"
 
 [build-dependencies]
-tonic-build = "^0.13"
+tonic-build = "^0.14"
