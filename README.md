@@ -70,7 +70,6 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=none
 SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
-IPAddressAllow=192.168.0.1/23
 IPAddressDeny=any
 UMask=0077
 
@@ -90,6 +89,8 @@ BindIPv6Only=both
 Accept=no
 FileDescriptorName=grpc
 Service=talos-unlockr.service
+IPAddressAllow=192.168.0.0/24
+IPAddressDeny=any
 
 [Install]
 WantedBy=sockets.target
