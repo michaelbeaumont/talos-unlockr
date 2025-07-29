@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tonic = { version = "^0.13", features =["tls-ring"] }
-prost = "^0.13.5"
+tonic = { version = "^0.14", features =["tls-ring"] }
+prost = "^0.14.1"
 tokio = { version = "^1.46", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "^0.7.15" }
 aead = { version = "^0.5.0", features = ["std"] }
@@ -22,6 +22,7 @@ log = { version = "^0.4.27", features = ["kv", "kv_std"] }
 env_logger = { version = "^0.11.8", features = ["unstable-kv"] }
 uuid = "1.17.0"
 libsystemd = "0.7.2"
+tonic-prost = "^0.14.0"
 
 [build-dependencies]
-tonic-build = "^0.13"
+tonic-prost-build = "^0.14.0"
