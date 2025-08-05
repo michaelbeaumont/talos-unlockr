@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 tonic = { version = "^0.14", features =["tls-ring"] }
 prost = "^0.14.1"
-tokio = { version = "^1.46", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "^1.47", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "^0.7.15" }
 aead = { version = "^0.5.0", features = ["std"] }
 chacha20poly1305 = "^0.10.0"
