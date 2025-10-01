@@ -18,7 +18,7 @@ typenum = "^1.18.0"
 clap = { version = "^4.5.48", features = ["derive"] }
 password-hash = { version = "^0.5.0" }
 anyhow = "^1.0.99"
-log = { version = "^0.4.27", features = ["kv", "kv_std"] }
+log = { version = "^0.4.28", features = ["kv", "kv_std"] }
 env_logger = { version = "^0.11.8", features = ["unstable-kv"] }
 uuid = "1.18.1"
 libsystemd = "0.7.2"
