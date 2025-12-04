@@ -17,9 +17,10 @@ use clap::{Args, Parser};
 use futures::future::{Either, join};
 use futures_util::FutureExt;
 use libsystemd::activation::IsType;
+use std::sync::Arc;
 use tokio::{
     signal,
-    sync::{broadcast, watch},
+    sync::{broadcast, watch, Notify},
     task::JoinSet,
 };
 use tokio_util::{
@@ -77,8 +78,13 @@ struct Cli {
     allowed_ips: Vec<(net::IpAddr, Uuid)>,
 }
 
+struct Timeout {
+    duration: time::Duration,
+    activity_notify: Arc<Notify>,
+}
+
 struct Run {
-    timeout_secs: Option<time::Duration>,
+    timeout: Option<Timeout>,
     listen: Either<(Vec<net::IpAddr>, u16), net::TcpListener>,
     key_source: KeySource,
     tls_identity: Option<Identity>,
@@ -186,7 +192,10 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     };
 
     Ok(Run {
-        timeout_secs: args.timeout_secs,
+        timeout: args.timeout_secs.map(|duration| Timeout {
+            duration,
+            activity_notify: Arc::new(Notify::new()),
+        }),
         listen,
         key_source,
         tls_identity,
@@ -198,7 +207,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
 impl Run {
     async fn run(self) -> Result<(), anyhow::Error> {
         let Run {
-            timeout_secs,
+            timeout,
             listen,
             key_source,
             tls_identity,
@@ -237,13 +246,14 @@ impl Run {
 
         let (update_allowed, allowed) = watch::channel(allowed_ips);
         let send_attempts = broadcast::Sender::new(10);
+        let activity_notify = timeout.as_ref().map(|t| &t.activity_notify);
 
         let mut join_set: JoinSet<_> = incoming
             .into_iter()
             .map(|(socket_addr, incoming)| {
                 log::info!(socket_addr:?; "listening");
                 let unlocker =
-                    Unlocker::new(key_source.clone(), allowed.clone(), send_attempts.clone());
+                    Unlocker::new(key_source.clone(), allowed.clone(), send_attempts.clone(), activity_notify.cloned());
 
                 let mut builder = Server::builder();
                 if let Some(identity) = &tls_identity {
@@ -331,16 +341,25 @@ impl Run {
                 }),
         );
 
-        if let Some(timeout_secs) = timeout_secs {
+        if let Some(Timeout { duration, activity_notify }) = timeout {
             let cancel_timeout = cancelled.clone();
             join_set.spawn(
-                tokio::time::sleep(timeout_secs)
-                    .map(move |_| {
-                        log::info!("timed out, exiting");
-                        cancel_timeout.cancel();
-                    })
-                    .with_cancellation_token_owned(cancelled)
-                    .map(|_| Ok(())),
+                async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(duration) => {
+                                log::info!("timed out after no activity, exiting");
+                                cancel_timeout.cancel();
+                                break;
+                            }
+                            _ = activity_notify.notified() => {
+                                log::debug!("activity detected, resetting timeout");
+                            }
+                        }
+                    }
+                }
+                .with_cancellation_token_owned(cancelled)
+                .map(|_| Ok(())),
             );
         }
 

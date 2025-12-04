@@ -32,6 +32,7 @@ pub struct Unlocker {
     key: KeySource,
     allowed_ips: watch::Receiver<std::collections::HashSet<(net::IpAddr, Uuid)>>,
     notify_attempt: broadcast::Sender<Attempt>,
+    notify_activity: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl Unlocker {
@@ -39,11 +40,13 @@ impl Unlocker {
         key: KeySource,
         allowed_ips: watch::Receiver<std::collections::HashSet<(net::IpAddr, Uuid)>>,
         notify_attempt: broadcast::Sender<Attempt>,
+        notify_activity: Option<std::sync::Arc<tokio::sync::Notify>>,
     ) -> KmsServiceServer<Self> {
         KmsServiceServer::new(Self {
             key,
             allowed_ips,
             notify_attempt,
+            notify_activity,
         })
     }
 
@@ -106,6 +109,10 @@ impl KmsService for Unlocker {
     ) -> Result<tonic::Response<Response>, tonic::Status> {
         let (request_data, node_uuid) = self.ensure_permission(AttemptKind::Seal, request).await?;
 
+        if let Some(ref notify) = self.notify_activity {
+            notify.notify_one();
+        }
+
         log::debug!(node_uuid:%; "Seal request");
 
         let cipher = self
@@ -133,6 +140,10 @@ impl KmsService for Unlocker {
     ) -> Result<tonic::Response<Response>, tonic::Status> {
         let (request_data, node_uuid) =
             self.ensure_permission(AttemptKind::Unseal, request).await?;
+
+        if let Some(ref notify) = self.notify_activity {
+            notify.notify_one();
+        }
 
         log::debug!(node_uuid:%; "Unseal request");
 
