@@ -162,10 +162,9 @@ async fn button_callback_handler(
                         .reserve_many(cluster.len())
                         .await
                         .expect("no receiver");
-                    for (permit, (ip, uuid)) in permits.zip(cluster) {
+                    for (permit, uuid) in permits.zip(cluster) {
                         let allow = Toggle {
                             kind: ToggleKind::Allow,
-                            ip: *ip,
                             uuid: *uuid,
                         };
                         permit.send(allow);
@@ -179,10 +178,9 @@ async fn button_callback_handler(
                         .reserve_many(cluster.len())
                         .await
                         .expect("no receiver");
-                    for (permit, (ip, uuid)) in permits.zip(cluster) {
+                    for (permit, uuid) in permits.zip(cluster) {
                         let block = Toggle {
                             kind: ToggleKind::Block,
-                            ip: *ip,
                             uuid: *uuid,
                         };
                         permit.send(block);
@@ -222,10 +220,9 @@ async fn button_callback_handler(
                 .reserve_many(cluster.len())
                 .await
                 .expect("no receiver");
-            for (permit, (ip, uuid)) in permits.zip(cluster_nodes) {
+            for (permit, uuid) in permits.zip(cluster_nodes) {
                 permit.send(Toggle {
                     kind: ToggleKind::Block,
-                    ip: *ip,
                     uuid: *uuid,
                 });
             }

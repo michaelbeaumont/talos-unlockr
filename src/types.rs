@@ -25,11 +25,10 @@ pub enum AttemptResponse {
 }
 
 #[derive(Clone, Debug)]
-pub struct ClusterNodes(pub HashMap<String, HashSet<(net::IpAddr, Uuid)>>);
+pub struct ClusterNodes(pub HashMap<String, HashSet<Uuid>>);
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Toggle {
-    pub ip: net::IpAddr,
     pub uuid: Uuid,
     pub kind: ToggleKind,
 }

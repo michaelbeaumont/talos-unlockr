@@ -1,4 +1,4 @@
-use std::{net, ops::Deref};
+use std::ops::Deref;
 
 use argon2::Argon2;
 use chacha20poly1305::{
@@ -30,7 +30,7 @@ pub enum KeySource {
 
 pub struct Unlocker {
     key: KeySource,
-    allowed_ips: watch::Receiver<std::collections::HashSet<(net::IpAddr, Uuid)>>,
+    allowed_nodes: watch::Receiver<std::collections::HashSet<Uuid>>,
     notify_attempt: broadcast::Sender<Attempt>,
     notify_activity: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
@@ -38,13 +38,13 @@ pub struct Unlocker {
 impl Unlocker {
     pub fn new(
         key: KeySource,
-        allowed_ips: watch::Receiver<std::collections::HashSet<(net::IpAddr, Uuid)>>,
+        allowed_nodes: watch::Receiver<std::collections::HashSet<Uuid>>,
         notify_attempt: broadcast::Sender<Attempt>,
         notify_activity: Option<std::sync::Arc<tokio::sync::Notify>>,
     ) -> KmsServiceServer<Self> {
         KmsServiceServer::new(Self {
             key,
-            allowed_ips,
+            allowed_nodes,
             notify_attempt,
             notify_activity,
         })
@@ -81,9 +81,9 @@ impl Unlocker {
             let uuid = &request.get_ref().node_uuid;
             Uuid::parse_str(uuid).expect("valid uuid")
         };
-        let tonic_resp = if !self.allowed_ips.borrow().contains(&(remote_addr, uuid)) {
-            log::debug!(node_uuid:% = request.get_ref().node_uuid, allowed_ips:? = self.allowed_ips.borrow().deref(), remote_addr:%; "unknown ip");
-            Err(tonic::Status::permission_denied("invalid source IP"))
+        let tonic_resp = if !self.allowed_nodes.borrow().contains(&uuid) {
+            log::debug!(node_uuid:% = request.get_ref().node_uuid, allowed_nodes:? = self.allowed_nodes.borrow().deref(), remote_addr:%; "unknown node");
+            Err(tonic::Status::permission_denied("unknown node"))
         } else {
             Ok((request.into_inner().data, uuid))
         };

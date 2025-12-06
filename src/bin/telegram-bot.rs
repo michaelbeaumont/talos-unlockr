@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    net,
     num::ParseIntError,
     str::FromStr,
 };
@@ -18,7 +17,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 struct AllowedNode {
     cluster_name: String,
-    ip: net::IpAddr,
     uuid: Uuid,
 }
 
@@ -26,14 +24,13 @@ impl FromStr for AllowedNode {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let [cluster_name, raw_ip, raw_uuid] = s
-            .splitn(3, "/")
+        let [cluster_name, raw_uuid] = s
+            .splitn(2, ",")
             .collect::<Vec<_>>()
             .try_into()
             .map_err(|_| anyhow::anyhow!("couldn't split on slash"))?;
         Ok(AllowedNode {
             cluster_name: cluster_name.to_owned(),
-            ip: net::IpAddr::from_str(raw_ip).context("invalid IP")?,
             uuid: Uuid::from_str(raw_uuid).context("invalid UUID")?,
         })
     }
@@ -42,7 +39,7 @@ impl FromStr for AllowedNode {
 #[derive(Debug, Parser)]
 struct Cli {
     #[arg(long)]
-    allowed_ips: Vec<AllowedNode>,
+    allowed_nodes: Vec<AllowedNode>,
     #[arg(long, value_parser = ValueParser::new(|s: &str| Result::<_, ParseIntError>::Ok(UserId(u64::from_str(s)?))))]
     user_id: UserId,
     #[arg(long)]
@@ -50,33 +47,28 @@ struct Cli {
 }
 
 struct Run {
-    allowed_ips: ClusterNodes,
+    allowed_nodes: ClusterNodes,
     user_id: UserId,
     socket: std::path::PathBuf,
 }
 
 fn handle_args(
     Cli {
-        allowed_ips,
+        allowed_nodes,
         user_id,
         socket,
     }: Cli,
 ) -> Result<Run, anyhow::Error> {
-    let allowed_ips = ClusterNodes(allowed_ips.into_iter().fold(
+    let allowed_nodes = ClusterNodes(allowed_nodes.into_iter().fold(
         HashMap::new(),
-        |mut map: HashMap<_, HashSet<(net::IpAddr, Uuid)>>,
-         AllowedNode {
-             cluster_name,
-             ip,
-             uuid,
-         }| {
-            map.entry(cluster_name).or_default().insert((ip, uuid));
+        |mut map: HashMap<_, HashSet<Uuid>>, AllowedNode { cluster_name, uuid }| {
+            map.entry(cluster_name).or_default().insert(uuid);
             map
         },
     ));
 
     Ok(Run {
-        allowed_ips,
+        allowed_nodes,
         user_id,
         socket,
     })
@@ -85,7 +77,7 @@ fn handle_args(
 impl Run {
     async fn run(self) -> Result<(), anyhow::Error> {
         let Run {
-            allowed_ips,
+            allowed_nodes,
             user_id,
             socket,
         } = self;
@@ -112,7 +104,7 @@ impl Run {
                 cancelled.clone(),
                 bot.clone(),
                 user_id,
-                allowed_ips.clone(),
+                allowed_nodes.clone(),
                 send_allowed,
             )
             .map(Ok),
@@ -121,7 +113,7 @@ impl Run {
         let (send_attempts, receive_attempts) = mpsc::channel(20);
 
         join_set.spawn(
-            telegram::handle_attempts(bot, user_id, allowed_ips, receive_attempts)
+            telegram::handle_attempts(bot, user_id, allowed_nodes, receive_attempts)
                 .with_cancellation_token_owned(cancelled.clone())
                 .map(|r| {
                     let _: () = r.unwrap_or(());

@@ -7,7 +7,6 @@ use std::{
         fd::{FromRawFd, IntoRawFd},
         unix::fs::PermissionsExt,
     },
-    str::FromStr,
     time,
 };
 
@@ -20,7 +19,7 @@ use libsystemd::activation::IsType;
 use std::sync::Arc;
 use tokio::{
     signal,
-    sync::{broadcast, watch, Notify},
+    sync::{Notify, broadcast, watch},
     task::JoinSet,
 };
 use tokio_util::{
@@ -34,14 +33,6 @@ use uuid::Uuid;
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
     let seconds = arg.parse()?;
     Ok(std::time::Duration::from_secs(seconds))
-}
-
-fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
-    let (raw_ip, raw_uuid) = arg.split_once("/").context("couldn't split on slash")?;
-    Ok((
-        net::IpAddr::from_str(raw_ip).context("invalid IP")?,
-        Uuid::from_str(raw_uuid).context("invalid UUID")?,
-    ))
 }
 
 #[derive(Debug, Args)]
@@ -74,8 +65,8 @@ struct Cli {
     tls: Option<TlsCli>,
     #[arg(long)]
     socket: Option<std::path::PathBuf>,
-    #[arg(long, value_parser = parse_colon_separated)]
-    allowed_ips: Vec<(net::IpAddr, Uuid)>,
+    #[arg(long)]
+    allowed_nodes: Vec<Uuid>,
 }
 
 struct Timeout {
@@ -89,7 +80,7 @@ struct Run {
     key_source: KeySource,
     tls_identity: Option<Identity>,
     socket: Option<std::path::PathBuf>,
-    allowed_ips: HashSet<(net::IpAddr, Uuid)>,
+    allowed_nodes: HashSet<Uuid>,
 }
 
 fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
@@ -199,7 +190,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         listen,
         key_source,
         tls_identity,
-        allowed_ips: args.allowed_ips.into_iter().collect(),
+        allowed_nodes: args.allowed_nodes.into_iter().collect(),
         socket: args.socket,
     })
 }
@@ -211,7 +202,7 @@ impl Run {
             listen,
             key_source,
             tls_identity,
-            allowed_ips,
+            allowed_nodes,
             socket,
         } = self;
         let cancelled = CancellationToken::new();
@@ -244,7 +235,7 @@ impl Run {
                 .collect::<Vec<_>>(),
         };
 
-        let (update_allowed, allowed) = watch::channel(allowed_ips);
+        let (update_allowed, allowed) = watch::channel(allowed_nodes);
         let send_attempts = broadcast::Sender::new(10);
         let activity_notify = timeout.as_ref().map(|t| &t.activity_notify);
 
@@ -252,8 +243,12 @@ impl Run {
             .into_iter()
             .map(|(socket_addr, incoming)| {
                 log::info!(socket_addr:?; "listening");
-                let unlocker =
-                    Unlocker::new(key_source.clone(), allowed.clone(), send_attempts.clone(), activity_notify.cloned());
+                let unlocker = Unlocker::new(
+                    key_source.clone(),
+                    allowed.clone(),
+                    send_attempts.clone(),
+                    activity_notify.cloned(),
+                );
 
                 let mut builder = Server::builder();
                 if let Some(identity) = &tls_identity {
@@ -341,7 +336,11 @@ impl Run {
                 }),
         );
 
-        if let Some(Timeout { duration, activity_notify }) = timeout {
+        if let Some(Timeout {
+            duration,
+            activity_notify,
+        }) = timeout
+        {
             let cancel_timeout = cancelled.clone();
             join_set.spawn(
                 async move {

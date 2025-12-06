@@ -1,4 +1,3 @@
-use core::net;
 use std::collections::HashSet;
 
 use futures::{SinkExt, StreamExt};
@@ -38,7 +37,7 @@ pub async fn sink_attempts(
 
 pub async fn stream_allowed(
     stream: unix::OwnedReadHalf,
-    updates: watch::Sender<HashSet<(net::IpAddr, uuid::Uuid)>>,
+    updates: watch::Sender<HashSet<uuid::Uuid>>,
 ) -> () {
     let codec = LinesCodec::new();
     let mut lines = FramedRead::new(stream, codec);
@@ -47,10 +46,10 @@ pub async fn stream_allowed(
         debug!(allow:?; "received allow update");
         updates.send_modify(|set| match allow.kind {
             ToggleKind::Allow => {
-                set.insert((allow.ip, allow.uuid));
+                set.insert(allow.uuid);
             }
             ToggleKind::Block => {
-                set.remove(&(allow.ip, allow.uuid));
+                set.remove(&allow.uuid);
             }
         });
     }

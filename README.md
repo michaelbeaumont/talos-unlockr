@@ -110,7 +110,7 @@ JoinsNamespaceOf=talos-unlockr.service
 
 [Service]
 Type=exec
-ExecStart=telegram-bot --socket /tmp/talos-unlockr.sock --user-id <TELEGRAM_USER> --allowed-ips <CLUSTER_NAME>/<IP>/<UUID>
+ExecStart=telegram-bot --socket /tmp/talos-unlockr.sock --user-id <TELEGRAM_USER> --allowed-nodes <CLUSTER_NAME>/<IP>/<UUID>
 Environment=TELOXIDE_TOKEN=...
 Restart=on-failure
 PrivateMounts=yes
