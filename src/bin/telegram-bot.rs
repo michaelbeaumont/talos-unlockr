@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     num::ParseIntError,
     str::FromStr,
+    time,
 };
 
 use anyhow::Context;
@@ -36,8 +37,15 @@ impl FromStr for AllowedNode {
     }
 }
 
+fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
+    let seconds = arg.parse()?;
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
 #[derive(Debug, Parser)]
 struct Cli {
+    #[arg(long, value_parser = parse_duration)]
+    timeout_secs: Option<time::Duration>,
     #[arg(long)]
     allowed_nodes: Vec<AllowedNode>,
     #[arg(long, value_parser = ValueParser::new(|s: &str| Result::<_, ParseIntError>::Ok(UserId(u64::from_str(s)?))))]
@@ -47,6 +55,7 @@ struct Cli {
 }
 
 struct Run {
+    timeout_secs: Option<time::Duration>,
     allowed_nodes: ClusterNodes,
     user_id: UserId,
     socket: std::path::PathBuf,
@@ -54,6 +63,7 @@ struct Run {
 
 fn handle_args(
     Cli {
+        timeout_secs,
         allowed_nodes,
         user_id,
         socket,
@@ -68,6 +78,7 @@ fn handle_args(
     ));
 
     Ok(Run {
+        timeout_secs,
         allowed_nodes,
         user_id,
         socket,
@@ -77,6 +88,7 @@ fn handle_args(
 impl Run {
     async fn run(self) -> Result<(), anyhow::Error> {
         let Run {
+            timeout_secs,
             allowed_nodes,
             user_id,
             socket,
@@ -102,6 +114,7 @@ impl Run {
         join_set.spawn(
             telegram::telegram_loop(
                 cancelled.clone(),
+                timeout_secs,
                 bot.clone(),
                 user_id,
                 allowed_nodes.clone(),

@@ -64,6 +64,7 @@ pub async fn handle_attempts(
 
 pub async fn telegram_loop(
     cancelled: CancellationToken,
+    timeout: Option<Duration>,
     bot: Bot,
     user_id: UserId,
     nodes: ClusterNodes,
@@ -82,9 +83,10 @@ pub async fn telegram_loop(
     )
     .dependencies(dptree::deps![
         InMemStorage::<State>::new(),
+        cancelled.clone(),
+        timeout,
         nodes,
-        allowed_nodes,
-        cancelled.clone()
+        allowed_nodes
     ])
     .build();
 
@@ -132,10 +134,9 @@ impl ClusterNodes {
     }
 }
 
-const TIMEOUT: Duration = Duration::from_secs(30);
-
 async fn button_callback_handler(
     cancelled: CancellationToken,
+    timeout: Option<Duration>,
     bot: Bot,
     query: CallbackQuery,
     nodes: ClusterNodes,
@@ -151,11 +152,11 @@ async fn button_callback_handler(
             bot.answer_callback_query(query.id.clone()).await?;
 
             tokio::spawn(cancelled.clone().run_until_cancelled_owned({
-                let timeout_nodes = nodes.clone();
+                let nodes = nodes.clone();
                 let allowed_nodes = allowed_nodes.clone();
                 let cluster_name = cluster.clone();
                 async move {
-                    let Some(cluster) = timeout_nodes.0.get(&cluster_name) else {
+                    let Some(cluster) = nodes.0.get(&cluster_name) else {
                         return;
                     };
                     let permits = allowed_nodes
@@ -170,9 +171,12 @@ async fn button_callback_handler(
                         permit.send(allow);
                     }
 
-                    log::info!(cluster=cluster_name; "nodes can now unseal!");
-                    time::sleep(TIMEOUT).await;
-                    log::info!(cluster=cluster_name; "timed out on unseal permission");
+                    log::info!(cluster=cluster_name; "nodes can now send requests!");
+                    let Some(timeout) = timeout else {
+                        return;
+                    };
+                    time::sleep(timeout).await;
+                    log::info!(cluster=cluster_name; "timed out on requests permission");
 
                     let permits = allowed_nodes
                         .reserve_many(cluster.len())
@@ -192,13 +196,13 @@ async fn button_callback_handler(
             if let Some(message) = query.regular_message() {
                 bot.edit_text(message, text)
                     .await
-                    .context("edit text after unseal")?;
+                    .context("edit text after allowing requests")?;
                 bot.edit_reply_markup(message)
                     .reply_markup(nodes.to_clusters_keyboard("Disallow actions", |cluster| {
                         CallbackToggle::Block { cluster }
                     }))
                     .await
-                    .context("edit reply after unseal")?;
+                    .context("edit reply after allowing requests")?;
             } else if let Some(id) = query.inline_message_id {
                 bot.edit_message_text_inline(id, text).await?;
             }
@@ -227,14 +231,14 @@ async fn button_callback_handler(
                 });
             }
 
-            let text = format!("{cluster} nodes can no longer seal or unseal!");
+            let text = format!("{cluster} nodes can no longer send requests");
             if let Some(message) = query.regular_message() {
                 bot.edit_text(message, text).await?;
             } else if let Some(id) = query.inline_message_id {
                 bot.edit_message_text_inline(id, text).await?;
             }
 
-            log::info!("{cluster} nodes can no longer seal or unseal!");
+            log::info!("{cluster} nodes can no longer send requests");
         }
     }
 
