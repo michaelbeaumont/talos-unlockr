@@ -44,7 +44,7 @@ LoadCredentialEncrypted=node.key:node.k8rn.talos.key
 LoadCredentialEncrypted=key.pem:talos-unlockr.key.pem
 LoadCredentialEncrypted=crt.pem:talos-unlockr.crt.pem
 ExecSearchPath=/usr/local/bin
-ExecStart=talos-unlockr --key-file %d/node.key --tls-key %d/key.pem --tls-cert %d/crt.pem $FLAGS
+ExecStart=talos-unlockr --named-sockets --key-file %d/node.key --tls-key %d/key.pem --tls-cert %d/crt.pem $FLAGS
 Restart=on-failure
 ProtectHome=yes
 PrivateUsers=yes
@@ -94,4 +94,66 @@ IPAddressDeny=any
 
 [Install]
 WantedBy=sockets.target
+```
+
+## Telegram bot
+
+`talos-unlockr` can also be run alongside a Telegram bot. The bot can be used to
+notify about and allow attempts to seal/unseal.
+
+```
+[Unit]
+Description=Telegram bot for talos-unlockr
+Wants=network-online.target
+After=network-online.target
+JoinsNamespaceOf=talos-unlockr.service
+BindsTo=talos-unlockr.service
+
+[Service]
+Type=exec
+ExecStart=telegram-bot --socket /var/tmp/talos-unlockr.sock --user-id <TELEGRAM_USER> --allowed-nodes <CLUSTER_NAME>,<UUID>
+Environment=TELOXIDE_TOKEN=...
+Restart=on-failure
+PrivateMounts=yes
+PrivateTmp=yes
+DynamicUser=yes
+ProtectHome=yes
+PrivateUsers=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+CapabilityBoundingSet=
+ProtectControlGroups=yes
+ProtectSystem=strict
+ProtectProc=invisible
+ProtectHostname=yes
+PrivateNetwork=no
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+UMask=0077
+
+# ... other security options
+
+[Install]
+WantedBy=multi-user.target
+```
+
+and add to `talos-unlockr.service`:
+
+```
+[Unit]
+Wants=talos-unlockr-bot.service
+
+[Service]
+ExecStart=... --socket /var/tmp/talos-unlockr.sock
+PrivateTmp=yes
 ```

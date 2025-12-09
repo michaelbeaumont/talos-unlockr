@@ -1,35 +1,38 @@
 use std::{
+    collections::HashSet,
+    fs::set_permissions,
     io::{Read, stdin},
     net,
-    os::fd::{FromRawFd, IntoRawFd},
-    str::FromStr,
+    os::{
+        fd::{FromRawFd, IntoRawFd},
+        unix::fs::PermissionsExt,
+    },
     time,
 };
 
 use anyhow::Context;
 use chacha20poly1305::Key;
 use clap::{Args, Parser};
-use futures::future::Either;
+use futures::future::{Either, join};
 use futures_util::FutureExt;
 use libsystemd::activation::IsType;
-use tokio::{net::TcpListener, signal, task::JoinSet, time as tokio_time};
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
+use tokio::{
+    signal,
+    sync::{Notify, broadcast, watch},
+    task::JoinSet,
+};
+use tokio_util::{
+    future::FutureExt as _, sync::CancellationToken, task::task_tracker::TaskTracker,
+};
 use tonic::transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming};
 
-use talos_unlockr::{KeySource, Unlocker};
+use talos_unlockr::{KeySource, Unlocker, sync, unix};
 use uuid::Uuid;
 
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
     let seconds = arg.parse()?;
     Ok(std::time::Duration::from_secs(seconds))
-}
-
-fn parse_colon_separated(arg: &str) -> anyhow::Result<(net::IpAddr, Uuid)> {
-    let (raw_ip, raw_uuid) = arg.rsplit_once(":").context("couldn't split on colon")?;
-    Ok((
-        net::IpAddr::from_str(raw_ip).context("invalid IP")?,
-        Uuid::from_str(raw_uuid).context("invalid UUID")?,
-    ))
 }
 
 #[derive(Debug, Args)]
@@ -56,20 +59,28 @@ struct Cli {
     listen: Option<ListenCli>,
     #[arg(long, conflicts_with_all = ["interface", "port"])]
     named_sockets: bool,
-    #[arg(long, value_parser = parse_colon_separated)]
-    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     tls: Option<TlsCli>,
+    #[arg(long)]
+    socket: Option<std::path::PathBuf>,
+    #[arg(long)]
+    allowed_nodes: Vec<Uuid>,
+}
+
+struct Timeout {
+    duration: time::Duration,
+    activity_notify: Arc<Notify>,
 }
 
 struct Run {
-    timeout_secs: Option<time::Duration>,
+    timeout: Option<Timeout>,
     listen: Either<(Vec<net::IpAddr>, u16), net::TcpListener>,
-    allowed_ips: Vec<(net::IpAddr, Uuid)>,
     key_source: KeySource,
     tls_identity: Option<Identity>,
+    socket: Option<std::path::PathBuf>,
+    allowed_nodes: HashSet<Uuid>,
 }
 
 fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
@@ -77,26 +88,24 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
         match args.key_file {
             Some(ref filename) => {
                 let mut key = Key::default();
-                let mut file = std::fs::File::open(filename).map_err(|err| {
-                    anyhow::Error::new(err).context(format!(
-                        "couldn't open key file {}",
-                        filename.to_string_lossy()
-                    ))
+                let mut file = std::fs::File::open(filename).with_context(|| {
+                    format!("couldn't open key file {}", filename.to_string_lossy())
                 })?;
                 let file_len = file
                     .metadata()
                     .map(|metadata| metadata.len())
-                    .context("failed to get key metadata")?;
+                    .context("failed to get file metadata")?;
 
                 if file_len == key.len() as u64 {
-                    file.read_exact(&mut key)?;
+                    file.read_exact(&mut key)
+                        .context("failed to read key from command line")?;
                     Ok(KeySource::Key(key))
                 } else {
-                    Err(anyhow::Error::msg(format!(
+                    Err(anyhow::anyhow!(
                         "invalid key in file, expected length: {}, actual length: {}",
                         key.len(),
                         file_len,
-                    )))
+                    ))
                 }
             }
             None => Ok({
@@ -105,7 +114,7 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
                 println!(">>> Enter passphrase:");
                 stdin()
                     .read_line(&mut passphrase)
-                    .context("failed to read stdin")?;
+                    .context("failed to read passphrase from stdin")?;
                 KeySource::Kdf(passphrase.trim_end().to_owned().into_bytes())
             }),
         }
@@ -122,8 +131,20 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
             // SAFETY: systemd guarantees this is a valid socket file descriptor.
             Either::Right(unsafe { net::TcpListener::from_raw_fd(fd.into_raw_fd()) })
         }
-        (Some(ListenCli{interface: None, port}), _) => Either::Left((vec![net::Ipv6Addr::UNSPECIFIED.into()], port)),
-        (Some(ListenCli{interface: Some(interface), port}), _) => {
+        (
+            Some(ListenCli {
+                interface: None,
+                port,
+            }),
+            _,
+        ) => Either::Left((vec![net::Ipv6Addr::UNSPECIFIED.into()], port)),
+        (
+            Some(ListenCli {
+                interface: Some(interface),
+                port,
+            }),
+            _,
+        ) => {
             let mut addrs: Vec<net::IpAddr> = Vec::new();
             for ifaddr in nix::ifaddrs::getifaddrs().expect("failed to get ifaddrs") {
                 if ifaddr.interface_name != interface {
@@ -147,7 +168,9 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
             Either::Left((addrs, port))
         }
         (None, false) => {
-            anyhow::bail!("You must use either --named-sockets or --port (optionally with --interface)");
+            anyhow::bail!(
+                "You must use either --named-sockets or --port (optionally with --interface)"
+            );
         }
     };
 
@@ -160,113 +183,191 @@ fn handle_args(args: Cli) -> Result<Run, anyhow::Error> {
     };
 
     Ok(Run {
-        timeout_secs: args.timeout_secs,
+        timeout: args.timeout_secs.map(|duration| Timeout {
+            duration,
+            activity_notify: Arc::new(Notify::new()),
+        }),
         listen,
-        allowed_ips: args.allowed_ips,
         key_source,
         tls_identity,
+        allowed_nodes: args.allowed_nodes.into_iter().collect(),
+        socket: args.socket,
     })
 }
 
-async fn run(
-    Run {
-        timeout_secs,
-        listen,
-        allowed_ips,
-        key_source,
-        tls_identity,
-    }: Run,
-) -> Result<(), anyhow::Error> {
-    let cancelled = CancellationToken::new();
+impl Run {
+    async fn run(self) -> Result<(), anyhow::Error> {
+        let Run {
+            timeout,
+            listen,
+            key_source,
+            tls_identity,
+            allowed_nodes,
+            socket,
+        } = self;
+        let cancelled = CancellationToken::new();
 
-    const TCP_NODELAY: bool = true;
-    let incoming = match listen {
-        Either::Right(listener) => {
-            let socket_addr = listener
-                .local_addr()
-                .context("failed to get local address")?;
+        const TCP_NODELAY: bool = true;
+        let incoming = match listen {
+            Either::Right(listener) => {
+                let socket_addr = listener
+                    .local_addr()
+                    .context("failed to get local address")?;
 
-            listener.set_nonblocking(true)?;
-            let listener =
-                TcpListener::from_std(listener).context("failed to convert from std listener")?;
+                listener.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .context("failed to convert from std listener")?;
 
-            vec![(socket_addr, TcpIncoming::from(listener))]
-        }
-        Either::Left((addrs, port)) => addrs
-            .into_iter()
-            .flat_map(|ip| {
-                let socket_addr = net::SocketAddr::new(ip, port);
-                match TcpIncoming::bind(socket_addr) {
-                    Ok(incoming) => Some((socket_addr, incoming)),
-                    Err(err) => {
-                        log::warn!(err:?, socket_addr:?; "failed to bind");
-                        None
+                vec![(socket_addr, TcpIncoming::from(listener))]
+            }
+            Either::Left((addrs, port)) => addrs
+                .into_iter()
+                .flat_map(|ip| {
+                    let socket_addr = net::SocketAddr::new(ip, port);
+                    match TcpIncoming::bind(socket_addr) {
+                        Ok(incoming) => Some((socket_addr, incoming)),
+                        Err(err) => {
+                            log::warn!(err:?, socket_addr:?; "failed to bind");
+                            None
+                        }
                     }
+                })
+                .collect::<Vec<_>>(),
+        };
+
+        let (update_allowed, allowed) = watch::channel(allowed_nodes);
+        let send_attempts = broadcast::Sender::new(10);
+        let activity_notify = timeout.as_ref().map(|t| &t.activity_notify);
+
+        let mut join_set: JoinSet<_> = incoming
+            .into_iter()
+            .map(|(socket_addr, incoming)| {
+                log::info!(socket_addr:?; "listening");
+                let unlocker = Unlocker::new(
+                    key_source.clone(),
+                    allowed.clone(),
+                    send_attempts.clone(),
+                    activity_notify.cloned(),
+                );
+
+                let mut builder = Server::builder();
+                if let Some(identity) = &tls_identity {
+                    builder = builder
+                        .tls_config(ServerTlsConfig::new().identity(identity.clone()))
+                        .unwrap()
                 }
+
+                let cancelled = cancelled.clone();
+                builder
+                    .add_service(unlocker)
+                    .serve_with_incoming_shutdown(
+                        incoming.with_nodelay(Some(TCP_NODELAY)),
+                        async move {
+                            cancelled.cancelled_owned().await;
+                            log::info!(socket_addr:?; "shutting down");
+                        },
+                    )
+                    .map(move |err| err.context(socket_addr))
             })
-            .collect::<Vec<_>>(),
-    };
+            .collect();
 
-    let mut join_set: JoinSet<_> = incoming
-        .into_iter()
-        .map(|(socket_addr, incoming)| {
-            log::info!(socket_addr:?; "listening");
-            let unlocker = Unlocker::new(
-                allowed_ips.clone().into_iter().collect(),
-                key_source.clone(),
-            );
+        if let Some(raw_path) = &socket {
+            let abstract_namespace_path = unix::to_abstract_namespace(raw_path);
+            let path = abstract_namespace_path.as_ref().unwrap_or(raw_path);
+            let listener =
+                tokio::net::UnixListener::bind(path).context("failed to open unix socket")?;
 
-            let mut builder = Server::builder();
-            if let Some(identity) = &tls_identity {
-                builder = builder
-                    .tls_config(ServerTlsConfig::new().identity(identity.clone()))
-                    .unwrap()
+            if abstract_namespace_path.is_none() {
+                set_permissions(path, PermissionsExt::from_mode(0o777))
+                    .context("failed to chmod unix socket")?;
             }
 
-            let cancelled = cancelled.clone();
-            builder
-                .add_service(unlocker)
-                .serve_with_incoming_shutdown(
-                    incoming.with_nodelay(Some(TCP_NODELAY)),
-                    async move {
-                        cancelled.cancelled_owned().await;
-                        log::info!(socket_addr:?; "shutting down");
-                    },
-                )
-                .map(move |err| err.context(socket_addr))
-        })
-        .collect();
+            let tasks = TaskTracker::new();
+            let shutdown_tasks = tasks.clone();
+            let cancelled_conn = cancelled.clone();
 
-    let ctrl_c_cancelled = cancelled.clone();
-    join_set.spawn(
-        cancelled
-            .clone()
-            .run_until_cancelled_owned(signal::ctrl_c().map(move |res| {
-                res.expect("ctrl-c signal should work");
-                ctrl_c_cancelled.cancel();
-                log::info!("caught ctrl-c")
-            }))
-            .map(|_| Ok(())),
-    );
+            let handle_conns = async move {
+                loop {
+                    let send_attempts = send_attempts.subscribe();
+                    let (stream, sink) = listener
+                        .accept()
+                        .await
+                        .expect("should accept")
+                        .0
+                        .into_split();
 
-    if let Some(timeout_secs) = timeout_secs {
-        let cancelled = cancelled.clone();
+                    tasks.spawn(
+                        join(
+                            sync::sink_attempts(sink, send_attempts),
+                            sync::stream_allowed(stream, update_allowed.clone()),
+                        )
+                        .with_cancellation_token_owned(cancelled_conn.clone()),
+                    );
+                }
+            };
+
+            join_set.spawn(
+                handle_conns
+                    .with_cancellation_token_owned(cancelled.clone())
+                    .then(async move |_| {
+                        log::info!("waiting for connections to shutdown");
+                        shutdown_tasks.close();
+                        shutdown_tasks.wait().await;
+                    })
+                    .map(Ok),
+            );
+        }
+
+        let ctrl_c_cancelled = cancelled.clone();
         join_set.spawn(
-            cancelled
-                .clone()
-                .run_until_cancelled_owned(tokio_time::sleep(timeout_secs).map(move |_| {
-                    log::info!("timed out, exiting");
-                    cancelled.cancel();
-                }))
-                .map(|_| Ok(())),
+            signal::ctrl_c()
+                .map(move |res| {
+                    res.expect("ctrl-c signal should work");
+                    log::info!("caught ctrl-c");
+                    ctrl_c_cancelled.cancel();
+                    anyhow::Ok(())
+                })
+                .with_cancellation_token_owned(cancelled.clone())
+                .map(move |_| {
+                    if let Some(socket) = socket {
+                        let _ = std::fs::remove_file(socket);
+                    }
+                    Ok(())
+                }),
         );
-    }
 
-    join_set
-        .join_all()
-        .await
-        .into_iter()
-        .collect::<Result<_, _>>()
+        if let Some(Timeout {
+            duration,
+            activity_notify,
+        }) = timeout
+        {
+            let cancel_timeout = cancelled.clone();
+            join_set.spawn(
+                async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(duration) => {
+                                log::info!("timed out after no activity, exiting");
+                                cancel_timeout.cancel();
+                                break;
+                            }
+                            _ = activity_notify.notified() => {
+                                log::debug!("activity detected, resetting timeout");
+                            }
+                        }
+                    }
+                }
+                .with_cancellation_token_owned(cancelled)
+                .map(|_| Ok(())),
+            );
+        }
+
+        join_set
+            .join_all()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+    }
 }
 
 #[tokio::main]
@@ -274,10 +375,9 @@ async fn main() -> Result<(), anyhow::Error> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Cli::parse();
-    log::debug!(args:?; "starting");
+    log::info!(args:?; "starting unlockr");
 
-    let run_args = handle_args(args)?;
-    run(run_args).await?;
+    handle_args(args)?.run().await?;
 
     log::info!("finished");
     Ok(())
