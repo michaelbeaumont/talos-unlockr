@@ -27,7 +27,10 @@ use tokio_util::{
 };
 use tonic::transport::{Identity, Server, ServerTlsConfig, server::TcpIncoming};
 
-use talos_unlockr::{KeySource, Unlocker, sync, unix};
+use talos_unlockr::{
+    grpc::{KeySource, Unlocker},
+    sync, unix,
+};
 use uuid::Uuid;
 
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
