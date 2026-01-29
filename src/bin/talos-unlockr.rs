@@ -261,16 +261,25 @@ impl Run {
                 }
 
                 let cancelled = cancelled.clone();
-                builder
-                    .add_service(unlocker)
-                    .serve_with_incoming_shutdown(
-                        incoming.with_nodelay(Some(TCP_NODELAY)),
-                        async move {
-                            cancelled.cancelled_owned().await;
-                            log::info!(socket_addr:?; "shutting down");
-                        },
-                    )
-                    .map(move |err| err.context(socket_addr))
+                let (health_reporter, health_service) = tonic_health::server::health_reporter();
+                async move {
+                    health_reporter
+                        .set_serving::<talos_unlockr::grpc::KmsServiceServer<Unlocker>>()
+                        .with_cancellation_token(&cancelled)
+                        .await;
+                    builder
+                        .add_service(health_service)
+                        .add_service(unlocker)
+                        .serve_with_incoming_shutdown(
+                            incoming.with_nodelay(Some(TCP_NODELAY)),
+                            async move {
+                                cancelled.cancelled_owned().await;
+                                log::info!(socket_addr:?; "shutting down");
+                            },
+                        )
+                        .map(move |err| err.context(socket_addr))
+                        .await
+                }
             })
             .collect();
 

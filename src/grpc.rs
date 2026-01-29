@@ -1,9 +1,7 @@
 use std::ops::Deref;
 
-use super::kms::{
-    Request, Response,
-    kms_service_server::{KmsService, KmsServiceServer},
-};
+pub use super::kms::KmsServiceServer;
+use super::kms::{Request, Response, kms_service_server::KmsService};
 pub use super::types::ClusterNodes;
 use super::types::{Attempt, AttemptKind, AttemptResponse};
 use argon2::Argon2;
