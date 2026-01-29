@@ -12,7 +12,7 @@ use teloxide::{Bot, types::UserId};
 use tokio::{signal, sync::mpsc, task::JoinSet};
 use tokio_util::{future::FutureExt as _, sync::CancellationToken};
 
-use talos_unlockr::{ClusterNodes, sync, telegram, unix};
+use talos_unlockr::{grpc::ClusterNodes, sync, telegram, unix};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
