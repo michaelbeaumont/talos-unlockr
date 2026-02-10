@@ -17,7 +17,7 @@ futures-util = "^0.3.31"
 typenum = "^1.19.0"
 clap = { version = "^4.5.57", features = ["derive"] }
 password-hash = { version = "^0.5.0" }
-anyhow = "^1.0.100"
+anyhow = "^1.0.101"
 log = { version = "^0.4.29", features = ["kv", "kv_std"] }
 env_logger = { version = "^0.11.8", features = ["unstable-kv"] }
 uuid = { version = "1.20.0", features = ["serde"] }
