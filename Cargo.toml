@@ -36,4 +36,4 @@ default-features = false
 features = ["http2", "charset", "system-proxy", "rustls-tls-native-roots-no-provider"]
 
 [build-dependencies]
-tonic-prost-build = "^0.14.4"
+tonic-prost-build = "^0.14.5"
